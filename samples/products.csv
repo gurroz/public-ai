@@ -1,0 +1,13 @@
+ID,Name,Brand,Category,Price,Stock,Release date
+P-001,iPhone 9,Apple,Smartphones,999,42,2023-09-22
+P-002,Galaxy 23,Samsung,Smartphones,1199,28,2023-02-17
+P-003,Pixel 8,Google,Smartphones,699,64,2023-10-12
+P-004,MacBook Air M3,Apple,Laptops,1299,18,2024-03-08
+P-005,WH-1000XM5,Sony,Audio,349,85,2022-05-20
+P-006,iPad Air,Apple,Tablets,599,36,2024-05-15
+P-007,Galaxy Tab S9,Samsung,Tablets,799,22,2023-08-11
+P-008,Surface Laptop 5,Microsoft,Laptops,1099,14,2022-10-25
+P-009,QuietComfort Ultra,Bose,Audio,429,51,2023-10-03
+P-010,ThinkPad X1 Carbon,Lenovo,Laptops,1649,9,2024-01-15
+P-011,Nothing Phone 2,Nothing,Smartphones,599,33,2023-07-17
+P-012,Studio Buds +,Beats,Audio,169,120,2023-05-18
