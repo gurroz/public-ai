@@ -12,6 +12,9 @@ class CsvImporter
  public static function isNumber(string $value): bool {
   return preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/D', $value) && is_finite((float)$value);
  }
+ public static function splitValues(string $value): array {
+  return array_values(array_unique(array_filter(array_map('trim', explode('|', $value)), fn($v) => $v !== ''), SORT_STRING));
+ }
  private function fail(string $message): never { throw ValidationException::withMessages(['csv' => $message]); }
  public function import(string $path, string $filename): array {
   $h = fopen($path, 'rb');
@@ -23,24 +26,26 @@ class CsvImporter
    $headers[0] = preg_replace('/^\xEF\xBB\xBF/', '', $headers[0]);
    foreach ($headers as $header) if (!mb_check_encoding($header, 'UTF-8')) $this->fail('Column names must be valid UTF-8.');
    if (in_array('', $headers, true) || count(array_unique(array_map('mb_strtolower', $headers))) !== count($headers)) $this->fail('Column names must be non-empty and unique.');
-   $types = array_fill(0, count($headers), null); $count = 0; $line = 1;
+   $types = array_fill(0, count($headers), null); $multiple = array_fill(0, count($headers), false); $count = 0; $line = 1;
    while (($row = fgetcsv($h, null, ',', '"', '')) !== false) {
     $line++; if ($row === [null]) continue;
     if (count($row) !== count($headers)) $this->fail("Record {$line} has a different number of fields than the header.");
-    if (trim($row[0]) === '' || trim($row[1]) === '') $this->fail("Record {$line} needs an ID and a name.");
+    if (!self::splitValues($row[0]) || !self::splitValues($row[1])) $this->fail("Record {$line} needs an ID and a name.");
     foreach ($row as $i => $value) {
      if (!mb_check_encoding($value, 'UTF-8')) $this->fail("Record {$line} is not valid UTF-8.");
-     $v = trim($value); if ($v === '') continue;
-     $type = $i < 2 ? 'text' : (self::isNumber($v) ? 'number' : (self::isDate($v) ? 'date' : 'text'));
-     $types[$i] = $types[$i] === null || $types[$i] === $type ? $type : 'text';
+     $multiple[$i] = $multiple[$i] || str_contains($value, '|');
+     foreach (self::splitValues($value) as $v) {
+      $type = $i < 2 ? 'text' : (self::isNumber($v) ? 'number' : (self::isDate($v) ? 'date' : 'text'));
+      $types[$i] = $types[$i] === null || $types[$i] === $type ? $type : 'text';
+     }
     }
     $count++;
    }
    if (!$count) $this->fail('The CSV has no products.');
-   $columns = array_map(fn($i) => ['key' => 'c'.$i, 'name' => $headers[$i], 'type' => $types[$i] ?? 'text'], array_keys($headers));
+   $columns = array_map(fn($i) => ['key' => 'c'.$i, 'name' => $headers[$i], 'type' => $types[$i] ?? 'text', 'multiple' => $multiple[$i]], array_keys($headers));
    DB::transaction(function() use ($h, $columns, $filename, $count) {
     DB::statement('DROP TABLE IF EXISTS products_incoming');
-    $ddl = array_map(fn($c) => '"'.$c['key'].'" '.($c['type'] === 'number' ? 'REAL' : 'TEXT'), $columns);
+    $ddl = array_map(fn($c) => '"'.$c['key'].'" '.($c['type'] === 'number' && !$c['multiple'] ? 'REAL' : 'TEXT'), $columns);
     DB::statement('CREATE TABLE products_incoming (_row INTEGER PRIMARY KEY, '.implode(', ', $ddl).')');
     rewind($h); fgetcsv($h, null, ',', '"', ''); $batch = [];
     // Bound variables remain under SQLite's conservative 999 parameter limit.
@@ -48,7 +53,11 @@ class CsvImporter
     while (($row = fgetcsv($h, null, ',', '"', '')) !== false) {
      if ($row === [null]) continue;
      $record = [];
-     foreach ($columns as $i => $column) { $v = trim($row[$i]); $record[$column['key']] = $v === '' ? null : ($column['type'] === 'number' ? (float)$v : $v); }
+     foreach ($columns as $i => $column) {
+      $items = self::splitValues($row[$i]);
+      if ($column['type'] === 'number') $items = array_map(fn($v) => (float)$v, $items);
+      $record[$column['key']] = !$items ? null : ($column['multiple'] ? json_encode($items, JSON_THROW_ON_ERROR) : $items[0]);
+     }
      $batch[] = $record;
      if (count($batch) >= $batchSize) { DB::table('products_incoming')->insert($batch); $batch = []; }
     }

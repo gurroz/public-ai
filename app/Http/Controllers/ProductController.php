@@ -23,7 +23,15 @@ class ProductController extends Controller
   return DB::transaction(function() use ($request, $query) {
    $catalog = $query->catalog();
    if (!$catalog) return response()->json(['data' => [], 'total' => 0, 'last_page' => 1, 'current_page' => 1]);
-   return response()->json($query->build($request->all(), $catalog)->paginate((int)$request->input('per_page', 25)));
+   $page = $query->build($request->all(), $catalog)->paginate((int)$request->input('per_page', 25));
+   $page->getCollection()->transform(function($product) use ($catalog) {
+    foreach ($catalog['columns'] as $column) {
+     $key = $column['key'];
+     if (($column['multiple'] ?? false) && $product->$key !== null) $product->$key = json_decode($product->$key, true, 512, JSON_THROW_ON_ERROR);
+    }
+    return $product;
+   });
+   return response()->json($page);
   });
  }
 }

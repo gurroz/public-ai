@@ -121,4 +121,76 @@ class CatalogTest extends TestCase
   $content="ID,Name,Price\n";for($i=1;$i<=20000;$i++)$content.="$i,Product $i,$i\n";
   $this->csv($content);$this->postJson('/products/query',['rules'=>[$this->rule('c2','between',19990,20000)]])->assertJsonPath('total',11);
  }
+ private function listFixture(): void {
+  $this->csv("ID,Name,Colours,Prices,Dates\n1,Phone, red | blue |red,5|25,2024-01-01|2024-03-01\n2,Tablet,blueberry,15,2024-02-01\n3,Watch,green,30,2024-04-01\n4,Empty, | |, | |, | |\n5,Comma,\"red,blue\",0,2024-05-01\n");
+ }
+ public static function listOperations(): array {return [
+  ['c2','equals','blue','',[1]], ['c2','not_equals','blue','',[2,3,5]],
+  ['c2','contains','blue','',[1,2,5]], ['c2','not_contains','blue','',[3]],
+  ['c2','equals','red,blue','',[5]], ['c2','contains','red|blue','',[]],
+  ['c3','gt','20','',[1,3]], ['c3','gte','25','',[1,3]],
+  ['c3','lt','5','',[5]], ['c3','lte','5','',[1,5]], ['c3','between','10','20',[2]],
+  ['c4','gt','2024-02-01','',[1,3,5]], ['c4','gte','2024-03-01','',[1,3,5]],
+  ['c4','lt','2024-02-01','',[1]], ['c4','lte','2024-02-01','',[1,2]],
+  ['c4','between','2024-02-01','2024-02-28',[2]],
+ ];}
+ #[DataProvider('listOperations')]
+ public function test_pipe_list_operations(string $col, string $op, string $value, string $to, array $ids): void {
+  $this->listFixture();
+  $response=$this->postJson('/products/query',['rules'=>[$this->rule($col,$op,$value,$to)]])->assertOk();
+  $this->assertSame(array_map('strval',$ids),array_column($response->json('data'),'c0'));
+ }
+ public function test_list_types_values_and_duplicate_items_are_preserved_correctly(): void {
+  $this->listFixture();$columns=app(ProductQuery::class)->catalog()['columns'];
+  $this->assertSame(['text','text','text','number','date'],array_column($columns,'type'));
+  $this->assertSame([false,false,true,true,true],array_column($columns,'multiple'));
+  $this->postJson('/products/query')->assertJsonPath('data.0.c2',['red','blue'])->assertJsonPath('data.0.c3',[5,25])
+   ->assertJsonPath('data.1.c2',['blueberry'])->assertJsonPath('data.3.c2',null)->assertJsonPath('data.4.c3',[0]);
+ }
+ public function test_list_filters_keep_and_or_precedence_and_do_not_duplicate_products(): void {
+  $this->listFixture();
+  $rules=[$this->rule('c2','equals','blue'),$this->rule('c2','equals','green','','OR'),$this->rule('c3','between',20,40)];
+  $this->postJson('/products/query',['rules'=>$rules])->assertOk()->assertJsonPath('total',2)->assertJsonPath('data.0.c0','1')->assertJsonPath('data.1.c0','3');
+  $this->postJson('/products/query',['rules'=>[$this->rule('c2','equals','blue'),$this->rule('c2','equals','red')]])->assertJsonPath('total',1);
+  $this->postJson('/products/query',['rules'=>[$this->rule('c3','gt',0)]])->assertJsonPath('total',3);
+ }
+ public function test_name_lists_use_item_search_and_first_item_sorting(): void {
+  $this->csv("ID,Name,Price\n1,Zeta|Alpha,100|5\n2,Beta,20\n");
+  $this->postJson('/products/query',['search'=>'Alpha'])->assertJsonPath('total',1)->assertJsonPath('data.0.c1',['Zeta','Alpha']);
+  $this->postJson('/products/query',['search'=>'Zeta|Alpha'])->assertJsonPath('total',0);
+  $this->postJson('/products/query',['sort'=>'c1'])->assertJsonPath('data.0.c0','2');
+  $this->postJson('/products/query',['sort'=>'c2'])->assertJsonPath('data.0.c0','2');
+ }
+ public function test_list_values_escape_wildcards_and_bind_sql_inputs(): void {
+  $this->csv("ID,Name,Tags\n1,Phone,50%_off|C:\\sale\n2,Tablet,plain|normal\n");
+  foreach(['%','_','\\'] as $value)$this->postJson('/products/query',['rules'=>[$this->rule('c2','contains',$value)]])->assertJsonPath('total',1);
+  $this->postJson('/products/query',['rules'=>[$this->rule('c2','equals',"' OR 1=1 --")]])->assertJsonPath('total',0);
+ }
+ public function test_lists_infer_mixed_types_from_every_item_and_reimport_rebuilds_storage(): void {
+  $this->csv("ID,Name,Value\n1,Phone,12|unknown\n2,Tablet,13\n");
+  $this->assertSame('text',app(ProductQuery::class)->catalog()['columns'][2]['type']);
+  $this->postJson('/products/query',['rules'=>[$this->rule('c2','equals','12')]])->assertJsonPath('total',1);
+  $this->csv("ID,Name,Value\n1,Phone,12\n");
+  $this->assertFalse(app(ProductQuery::class)->catalog()['columns'][2]['multiple']);
+  $this->postJson('/products/query')->assertJsonPath('data.0.c2',12);
+ }
+ public function test_failed_list_replacement_keeps_prior_list_storage(): void {
+  $this->listFixture();
+  try{$this->csv("ID,Name,Values\n1,Phone,red|blue\n2,Tablet\n");$this->fail('Expected validation failure');}catch(ValidationException $e){}
+  $this->postJson('/products/query',['rules'=>[$this->rule('c2','equals','blue')]])->assertJsonPath('total',1);
+ }
+ public function test_existing_catalogue_without_list_metadata_still_queries(): void {
+  $this->fixture();$c=app(ProductQuery::class)->catalog();
+  foreach($c['columns'] as &$column)unset($column['multiple']);unset($column);
+  DB::table('catalogs')->update(['columns'=>json_encode($c['columns'])]);
+  $this->postJson('/products/query',['rules'=>[$this->rule('c1','equals','Galaxy 23')]])->assertOk()->assertJsonPath('total',2);
+ }
+ public function test_wide_csv_with_lists_stays_within_insert_parameter_limits(): void {
+  $header=['ID','Name'];for($i=2;$i<100;$i++)$header[]='Custom'.$i;
+  $csv=implode(',',$header)."\n";
+  for($i=1;$i<=100;$i++)$csv.=implode(',',array_merge([(string)$i,'Product'],array_fill(0,98,'10|20')))."\n";
+  $this->csv($csv);
+  $this->postJson('/products/query',['rules'=>[$this->rule('c99','between',15,25)]])->assertJsonPath('total',100)->assertJsonCount(25,'data');
+ }
+
 }

@@ -36,22 +36,45 @@ class ProductQuery
     if ($col['type'] === 'number') $values = array_map(fn($v) => (float)$v, $values);
     if ($op === 'between' && $values[0] > $values[1]) $this->fail('The lower bound must not exceed the upper bound.');
     $boolean = $i > 0 && $join === 'OR' ? 'or' : 'and'; $key = $col['key'];
-    if ($op === 'between') $group->whereBetween($key, $values, $boolean);
-    elseif (in_array($op, ['contains', 'not_contains'])) {
-     $pattern = '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], (string)$values[0]).'%';
-     $group->whereRaw('"'.$key.'" '.($op === 'not_contains' ? 'NOT LIKE' : 'LIKE')." ? ESCAPE '\\'", [$pattern], $boolean);
-    } else $group->where($key, ['equals' => '=', 'not_equals' => '!=', 'gt' => '>', 'gte' => '>=', 'lt' => '<', 'lte' => '<='][$op], $values[0], $boolean);
+    if ($col['multiple'] ?? false) {
+     // Each condition checks one list independently. Negative operations mean no item matches.
+     $negative = in_array($op, ['not_equals', 'not_contains'], true);
+     $positive = ['not_equals' => 'equals', 'not_contains' => 'contains'][$op] ?? $op;
+     $group->where(function(Builder $condition) use ($key, $positive, $values, $negative, $col) {
+      $condition->whereNotNull($key);
+      $items = DB::query()->selectRaw('1')->fromRaw('json_each(products."'.$key.'") AS item');
+      $this->compare($items, 'item.value', $positive, $values, 'and', $col['type'] === 'number');
+      $condition->whereExists($items, 'and', $negative);
+     }, null, null, $boolean);
+    } else $this->compare($group, $key, $op, $values, $boolean);
    }
   });
   $search = $input['search'] ?? '';
   if (!is_string($search) || mb_strlen($search) > 200) $this->fail('Search must be at most 200 characters.');
   if ($search !== '') {
-   $pattern = '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $search).'%';
-   $q->whereRaw("c1 LIKE ? ESCAPE '\\'", [$pattern]);
+   if ($columns['c1']['multiple'] ?? false) {
+    $items = DB::query()->selectRaw('1')->fromRaw('json_each(products.c1) AS item');
+    $this->compare($items, 'item.value', 'contains', [$search]);
+    $q->whereExists($items);
+   } else $this->compare($q, 'c1', 'contains', [$search]);
   }
   $sort = $input['sort'] ?? '_row'; $direction = $input['direction'] ?? 'asc';
   if (!is_string($sort) || !is_string($direction)) $this->fail('Invalid sorting.');
   if (($sort !== '_row' && !isset($columns[$sort])) || !in_array($direction, ['asc', 'desc'], true)) $this->fail('Invalid sorting.');
-  return $q->orderBy($sort, $direction)->when($sort !== '_row', fn($q) => $q->orderBy('_row'));
+  if ($columns[$sort]['multiple'] ?? false) $q->orderByRaw("json_extract(\"{$sort}\", '$[0]') {$direction}");
+  else $q->orderBy($sort, $direction);
+  return $q->when($sort !== '_row', fn($q) => $q->orderBy('_row'));
  }
+ private function compare(Builder $query, string $key, string $op, array $values, string $boolean = 'and', bool $numeric = false): void {
+  // JSON table values have no SQLite column affinity; CAST ensures numeric bound comparisons.
+  $comparison = $numeric ? DB::raw('CAST('.$query->getGrammar()->wrap($key).' AS REAL)') : $key;
+  if ($op === 'between') $query->whereBetween($comparison, $values, $boolean);
+  elseif (in_array($op, ['contains', 'not_contains'], true)) {
+   $pattern = '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], (string)$values[0]).'%';
+   // $key is generated internally (cN or item.value), never a CSV header or user input.
+   $wrapped = $query->getGrammar()->wrap($key);
+   $query->whereRaw($wrapped.' '.($op === 'not_contains' ? 'NOT LIKE' : 'LIKE')." ? ESCAPE '\\'", [$pattern], $boolean);
+  } else $query->where($comparison, ['equals' => '=', 'not_equals' => '!=', 'gt' => '>', 'gte' => '>=', 'lt' => '<', 'lte' => '<='][$op], $values[0], $boolean);
+ }
+
 }
